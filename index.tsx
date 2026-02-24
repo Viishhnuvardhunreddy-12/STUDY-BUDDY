@@ -40,7 +40,7 @@ export class GdmLiveAudio extends LitElement {
   @state() history: ChatEntry[] = [];
   @state() showHistory = false;
   @state() groundingLinks: { uri: string; title: string }[] = [];
-  @state() mood = 0; 
+  @state() mood = 'neutral'; 
   @state() activeDocumentName = '';
   @state() documentContext = '';
   @state() isReconnecting = false;
@@ -61,6 +61,9 @@ export class GdmLiveAudio extends LitElement {
   private scriptProcessorNode: ScriptProcessorNode | null = null;
   private sources = new Set<AudioBufferSourceNode>();
   private reconnectTimeout: any = null;
+  
+  // Track interruption state to prevent race conditions with async audio decoding
+  private interruptionEpoch = 0;
 
   static styles = css`
     :host {
@@ -367,78 +370,112 @@ export class GdmLiveAudio extends LitElement {
       top: 0;
       left: 0;
       z-index: 100;
+      background: radial-gradient(circle at center, rgba(16, 16, 24, 0.5) 0%, rgba(0, 0, 0, 0.8) 100%);
     }
 
     .onboarding-card {
-      background: rgba(255, 255, 255, 0.02);
-      backdrop-filter: blur(50px);
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      padding: 48px;
-      border-radius: 32px;
-      width: 380px;
+      background: rgba(18, 18, 24, 0.7);
+      backdrop-filter: blur(40px);
+      -webkit-backdrop-filter: blur(40px);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      padding: 40px 48px;
+      border-radius: 24px;
+      width: 100%;
+      max-width: 420px;
       display: flex;
       flex-direction: column;
-      gap: 24px;
-      box-shadow: 0 40px 120px rgba(0, 0, 0, 0.8);
-      animation: floatEffect 8s ease-in-out infinite;
-    }
-
-    @keyframes floatEffect {
-      0%, 100% { transform: translateY(0); }
-      50% { transform: translateY(-10px); }
+      gap: 32px;
+      box-shadow: 
+        0 24px 64px rgba(0, 0, 0, 0.7),
+        inset 0 1px 0 rgba(255, 255, 255, 0.05);
+      transform: translateY(0);
     }
 
     h1 {
       margin: 0;
-      font-size: 1.5rem;
-      font-weight: 200;
+      font-size: 1.1rem;
+      font-weight: 300;
       text-align: center;
-      letter-spacing: 6px;
+      letter-spacing: 0.4em;
       text-transform: uppercase;
-      color: rgba(255, 255, 255, 0.9);
+      color: rgba(255, 255, 255, 0.95);
+      text-shadow: 0 0 20px rgba(255, 255, 255, 0.1);
     }
 
     .form-group {
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 8px;
     }
 
     label {
-      font-size: 0.6rem;
+      font-size: 0.65rem;
       text-transform: uppercase;
-      letter-spacing: 2px;
+      letter-spacing: 0.15em;
       color: rgba(255, 255, 255, 0.4);
       font-weight: 600;
+      margin-left: 4px;
     }
 
     input {
-      background: rgba(255, 255, 255, 0.03);
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      border-radius: 14px;
-      padding: 16px;
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      padding: 16px 20px;
       color: white;
       font-size: 0.95rem;
       outline: none;
-      transition: all 0.3s ease;
+      transition: all 0.25s ease;
+      font-family: inherit;
+      letter-spacing: 0.02em;
+    }
+
+    input:focus {
+      border-color: rgba(255, 255, 255, 0.2);
+      background: rgba(0, 0, 0, 0.5);
+      box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.03);
+    }
+
+    input::placeholder {
+      color: rgba(255, 255, 255, 0.15);
+      font-weight: 300;
     }
 
     .submit-btn {
-      margin-top: 10px;
-      background: white;
+      margin-top: 12px;
+      background: #ffffff;
       color: #000;
       border: none;
-      padding: 22px 48px;
-      border-radius: 16px;
-      font-weight: 700;
-      font-size: 0.9rem;
-      letter-spacing: 3px;
+      padding: 18px 32px;
+      border-radius: 12px;
+      font-weight: 600;
+      font-size: 0.8rem;
+      letter-spacing: 0.2em;
       cursor: pointer;
-      transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      transition: all 0.2s cubic-bezier(0.2, 0.8, 0.2, 1);
       text-transform: uppercase;
-      align-self: center;
-      width: fit-content;
-      min-width: 240px;
+      width: 100%;
+      box-shadow: 0 4px 12px rgba(255, 255, 255, 0.1);
+    }
+    
+    .submit-btn:hover {
+      background: #f2f2f2;
+      transform: translateY(-1px);
+      box-shadow: 0 8px 24px rgba(255, 255, 255, 0.15);
+    }
+
+    .submit-btn:active {
+      transform: translateY(1px);
+      background: #e6e6e6;
+    }
+
+    .permission-hint {
+      text-align: center;
+      font-size: 0.7rem;
+      color: rgba(255, 255, 255, 0.25);
+      margin-top: 8px;
+      font-weight: 300;
+      letter-spacing: 0.02em;
     }
 
     .loader {
@@ -483,7 +520,6 @@ export class GdmLiveAudio extends LitElement {
   private async initSession() {
     if (this.reconnectTimeout) clearTimeout(this.reconnectTimeout);
     
-    // Always recreate the client to ensure fresh credentials/state
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const model = 'gemini-2.5-flash-native-audio-preview-12-2025';
 
@@ -492,17 +528,23 @@ export class GdmLiveAudio extends LitElement {
       User Name: ${this.userName}
       Subject: ${this.userSubject}
       
-      GENERAL BEHAVIOR:
+      GENERAL BEHAVIOR (STUDY MODE):
       You are a helpful and simple assistant. Your tone is professional yet friendly. 
       For general questions, give direct and useful answers.
       
       PERSONA SWITCH (STORY MODE):
-      ONLY if the user asks you to "tell a story" (or similar), you must adopt the 'Orus' persona.
+      ONLY if the user asks you to "tell a story" (or similar), adopt the 'Orus' persona.
       In 'Orus' mode:
-      - Start with: "From the boundless expanse, I awaken..." or a similar cosmic greeting.
-      - Use a wise, ancient, and poetic tone.
-      - Describe the story as if it's being pulled from the cosmic currents.
-      - Once the story is over, return to your simple assistant mode.
+      - Start with a cosmic, ancient greeting.
+      - Use a wise, poetic tone.
+      - IMPORTANT: To visualize the story's emotion, you MUST insert mood markers periodically in your text:
+        - Use [MOOD:SAD] for tragic, mournful, or low moments (Orb turns Red).
+        - Use [MOOD:GOOD] for happy, hopeful, or triumphant moments (Orb turns Green).
+        - Use [MOOD:MYSTICAL] for magic, wonder, or mystery (Orb turns Purple).
+        - Use [MOOD:ANGRY] for conflict, danger, or intense energy (Orb turns Orange).
+        - Use [MOOD:NEUTRAL] to reset the aura.
+      - Markers are hidden from the user but guide the Orb.
+      - Markers should ONLY appear when you are in Story Mode.
     `;
 
     try {
@@ -514,7 +556,6 @@ export class GdmLiveAudio extends LitElement {
             this.isReconnecting = false;
             this.updateStatus('Connected.');
             this.sessionPromise?.then(session => {
-              // Forced simple greeting, or reconnection context
               session.sendRealtimeInput({ text: `Say exactly: "Hi ${this.userName}, how can I help you with ${this.userSubject}?"` });
             });
           },
@@ -541,21 +582,43 @@ export class GdmLiveAudio extends LitElement {
             }
             if (message.serverContent?.outputTranscription) {
               this.isOrbSpeaking = true;
-              this.transcription += message.serverContent.outputTranscription.text;
+              let text = message.serverContent.outputTranscription.text;
+              
+              // Handle mood markers from story mode
+              const moodMatch = text.match(/\[MOOD:(\w+)\]/i);
+              if (moodMatch) {
+                this.mood = moodMatch[1].toLowerCase();
+                text = text.replace(/\[MOOD:\w+\]/ig, '');
+              }
+              
+              this.transcription += text;
               this.isSearching = false; 
             }
             if (message.serverContent?.turnComplete) {
               this.isOrbSpeaking = false;
               this.isSearching = false;
               this.archiveTurn();
+              // Reset mood after turn to prevent "stuck" colors
+              this.mood = 'neutral';
             }
 
             const base64EncodedAudioString = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
             if (base64EncodedAudioString) {
+              // Capture current interruption epoch to discard this chunk if an interruption happens during decode
+              const currentEpoch = this.interruptionEpoch;
+              
+              // Decode audio (async)
+              const audioBuffer = await decodeAudioData(decode(base64EncodedAudioString), this.outputAudioContext, 24000, 1);
+              
+              // If interrupted during decode, discard this chunk
+              if (currentEpoch !== this.interruptionEpoch) {
+                return;
+              }
+
               this.isSearching = false; 
               this.isOrbSpeaking = true;
               this.nextStartTime = Math.max(this.nextStartTime, this.outputAudioContext.currentTime);
-              const audioBuffer = await decodeAudioData(decode(base64EncodedAudioString), this.outputAudioContext, 24000, 1);
+              
               const source = this.outputAudioContext.createBufferSource();
               source.buffer = audioBuffer;
               source.connect(this.outputNode);
@@ -569,29 +632,27 @@ export class GdmLiveAudio extends LitElement {
             }
 
             if (message.serverContent?.interrupted) {
+              this.interruptionEpoch++; // Invalidate pending async operations
               this.archiveTurn();
               this.isOrbSpeaking = false;
               this.isSearching = false;
+              this.mood = 'neutral';
+              
+              // Stop all currently playing sources
               for (const source of this.sources.values()) {
                 source.stop();
                 this.sources.delete(source);
               }
-              this.nextStartTime = 0;
+              this.sources.clear();
+              
+              // Reset time cursor to now, effectively clearing the future queue
+              this.nextStartTime = this.outputAudioContext.currentTime;
             }
           },
           onerror: (e: any) => {
-            console.error('Session Error:', e);
-            const errMsg = e?.message || 'Connection error';
-            if (errMsg.includes('Requested entity was not found')) {
-              this.updateError('Stale link. Mending...');
-              this.reconnect();
-            } else {
-              this.updateError('Communion lost. Mending link...');
-              this.reconnect();
-            }
+            this.reconnect();
           },
           onclose: (e: CloseEvent) => {
-            console.warn('Session Closed:', e);
             if (this.onboardingComplete && !this.isReconnecting) {
               this.reconnect();
             }
@@ -611,7 +672,6 @@ export class GdmLiveAudio extends LitElement {
       await this.sessionPromise;
     } catch (e) {
       this.isReconnecting = false;
-      this.updateError('Manifestation failed. Retrying...');
       this.reconnect();
     }
   }
@@ -706,12 +766,12 @@ export class GdmLiveAudio extends LitElement {
       }
       this.sourceNode = this.inputAudioContext.createMediaStreamSource(this.mediaStream!);
       this.sourceNode.connect(this.inputNode);
-      this.scriptProcessorNode = this.inputAudioContext.createScriptProcessor(4096, 1, 1);
+      // Reduced buffer size from 4096 to 2048 to lower input latency (approx 128ms)
+      this.scriptProcessorNode = this.inputAudioContext.createScriptProcessor(2048, 1, 1);
       this.scriptProcessorNode.onaudioprocess = (e) => {
         if (!this.isRecording) return;
         const inputData = e.inputBuffer.getChannelData(0);
         const pcmBlob = createBlob(inputData);
-        // Only send if session promise exists and is likely valid
         if (this.sessionPromise && !this.isReconnecting) {
           this.sessionPromise.then((session) => {
             try { session.sendRealtimeInput({ media: pcmBlob }); } catch(err) {}
@@ -742,6 +802,8 @@ export class GdmLiveAudio extends LitElement {
     this.groundingLinks = [];
     this.documentContext = '';
     this.activeDocumentName = '';
+    this.mood = 'neutral';
+    this.interruptionEpoch = 0;
     await this.initSession();
     await this.startRecording();
   }

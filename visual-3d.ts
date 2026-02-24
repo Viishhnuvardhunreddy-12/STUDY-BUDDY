@@ -12,13 +12,15 @@ import {LitElement, css, html} from 'lit';
 import {customElement, property, query} from 'lit/decorators.js';
 import {Analyser} from './analyser';
 
-import * as THREE from 'three';
+import * as THREE from 'this-package-should-be-three';
+// Using generic import as requested but Three.js is required. 
+// Standard Three.js imports for this specific platform:
+import * as THREE_RAW from 'three';
+const THREE = THREE_RAW;
 import {EXRLoader} from 'three/addons/loaders/EXRLoader.js';
 import {EffectComposer} from 'three/addons/postprocessing/EffectComposer.js';
 import {RenderPass} from 'three/addons/postprocessing/RenderPass.js';
-import {ShaderPass} from 'three/addons/postprocessing/ShaderPass.js';
 import {UnrealBloomPass} from 'three/addons/postprocessing/UnrealBloomPass.js';
-import {FXAAShader} from 'three/addons/shaders/FXAAShader.js';
 import {fs as backdropFS, vs as backdropVS} from './backdrop-shader';
 import {vs as sphereVS} from './sphere-shader';
 
@@ -37,10 +39,19 @@ export class GdmLiveAudioVisuals3D extends LitElement {
   private prevTime = 0;
   private rotation = new THREE.Vector3(0, 0, 0);
   private currentIntensity = 0;
-  private currentMood = 0; 
+  
+  private moodColors: Record<string, { color: number, emissive: number }> = {
+    neutral: { color: 0x121225, emissive: 0x050515 },
+    sad: { color: 0x330000, emissive: 0x990000 },
+    good: { color: 0x003311, emissive: 0x00cc44 },
+    happy: { color: 0x003311, emissive: 0x00cc44 },
+    mystical: { color: 0x220044, emissive: 0xaa00ff },
+    angry: { color: 0x441100, emissive: 0xff4400 },
+    tense: { color: 0x221100, emissive: 0x552200 }
+  };
 
   @property({type: Boolean}) isSearching = false;
-  @property({type: Number}) mood = 0; 
+  @property({type: String}) mood = 'neutral'; 
 
   private _outputNode!: AudioNode;
 
@@ -119,14 +130,13 @@ export class GdmLiveAudioVisuals3D extends LitElement {
 
     const geometry = new THREE.IcosahedronGeometry(1, 12);
 
-    // Initial sphere material setup with high gloss/reflection for "original" look
     const sphereMaterial = new THREE.MeshStandardMaterial({
-      color: 0x121225, // Deep obsidian/indigo
+      color: 0x121225,
       metalness: 0.95,
-      roughness: 0.02, // Polished surface for sharp reflections
+      roughness: 0.02,
       emissive: 0x050515,
-      emissiveIntensity: 0.2,
-      envMapIntensity: 1.5, // Make reflections more visible
+      emissiveIntensity: 0.5,
+      envMapIntensity: 1.5,
     });
 
     new EXRLoader().load('piz_compressed.exr', (texture: THREE.Texture) => {
@@ -185,7 +195,7 @@ export class GdmLiveAudioVisuals3D extends LitElement {
     const renderPass = new RenderPass(scene, camera);
     const bloomPass = new UnrealBloomPass(
       new THREE.Vector2(window.innerWidth, window.innerHeight),
-      1.2, // Slightly lower bloom to preserve surface detail
+      1.5,
       0.4, 
       0.85 
     );
@@ -226,25 +236,24 @@ export class GdmLiveAudioVisuals3D extends LitElement {
     const sphereMaterial = this.sphere.material as THREE.MeshStandardMaterial;
     const particleMaterial = this.particleSystem.material as THREE.PointsMaterial;
 
-    this.currentMood += (this.mood - this.currentMood) * 0.03 * dt;
-
     const targetIntensity = this.isSearching ? 1.0 : 0.0;
     this.currentIntensity += (targetIntensity - this.currentIntensity) * 0.05 * dt;
     backdropMaterial.uniforms.intensity.value = this.currentIntensity;
     backdropMaterial.uniforms.rand.value = Math.random() * 10000;
 
-    // Restore "Original" Colour Aesthetic: High-gloss Obsidian/Deep Indigo
-    const originalColor = new THREE.Color(0x121225);
-    const originalEmissive = new THREE.Color(0x050515);
-    
-    // Minimal mood influence to keep the orb looking like the requested image
-    const moodEmissive = this.currentMood < 0 ? new THREE.Color(0x080010) : new THREE.Color(0x151000);
-    const targetEmissive = new THREE.Color().lerpColors(originalEmissive, moodEmissive, Math.abs(this.currentMood) * 0.15);
+    // Mood-based Color Lerp
+    const targetMoodCfg = this.moodColors[this.mood] || this.moodColors.neutral;
+    const targetColor = new THREE.Color(targetMoodCfg.color);
+    const targetEmissive = new THREE.Color(targetMoodCfg.emissive);
 
-    sphereMaterial.color.lerp(originalColor, 0.05 * dt);
-    sphereMaterial.emissive.lerp(targetEmissive, 0.05 * dt);
+    sphereMaterial.color.lerp(targetColor, 0.08 * dt);
+    sphereMaterial.emissive.lerp(targetEmissive, 0.08 * dt);
     
-    // Smoothly maintain the polished look (Low roughness, high metalness)
+    // Dynamic emissive pulse for active moods
+    const baseEmissiveIntensity = (this.mood === 'neutral' || this.mood === '') ? 0.3 : 1.2;
+    const pulse = 1.0 + 0.3 * Math.sin(t * 0.003);
+    sphereMaterial.emissiveIntensity = baseEmissiveIntensity * pulse;
+
     sphereMaterial.roughness += (0.02 - sphereMaterial.roughness) * 0.05 * dt;
     sphereMaterial.metalness += (0.95 - sphereMaterial.metalness) * 0.05 * dt;
 
@@ -278,12 +287,9 @@ export class GdmLiveAudioVisuals3D extends LitElement {
       const outVol = this.outputAnalyser.data[1] / 255;
       const inVol = this.inputAnalyser.data[1] / 255;
       
-      // Keep scaling very subtle for a calm experience
-      const moodScaleBase = 1.0 - (this.currentMood < 0 ? Math.abs(this.currentMood) * 0.05 : 0);
-      this.sphere.scale.setScalar(moodScaleBase + 0.012 * outVol + 0.004 * inVol);
+      this.sphere.scale.setScalar(1.0 + 0.015 * outVol + 0.005 * inVol);
 
       const f = 0.0006; 
-      // Minimal rotation/shake as requested previously
       this.rotation.x += dt * f * (0.5 + 0.05 * outVol);
       this.rotation.y += dt * f * (0.3 + 0.05 * inVol);
       this.rotation.z += dt * f * 0.2;
@@ -292,19 +298,16 @@ export class GdmLiveAudioVisuals3D extends LitElement {
 
       sphereMaterial.userData.shader.uniforms.time.value += dt * 0.01;
       
-      const distortionFreqScale = this.currentMood < 0 ? 1.1 : 0.85; 
-
-      // Minimal surface distortion
       sphereMaterial.userData.shader.uniforms.inputData.value.set(
         (0.3 * this.inputAnalyser.data[0]) / 255,
         (0.08 * this.inputAnalyser.data[1]) / 255,
-        (6.0 * distortionFreqScale * this.inputAnalyser.data[2]) / 255,
+        (6.0 * this.inputAnalyser.data[2]) / 255,
         0,
       );
       sphereMaterial.userData.shader.uniforms.outputData.value.set(
         (0.8 * this.outputAnalyser.data[0]) / 255,
         (0.15 * this.outputAnalyser.data[1]) / 255,
-        (8.0 * distortionFreqScale * this.outputAnalyser.data[2]) / 255,
+        (8.0 * this.outputAnalyser.data[2]) / 255,
         0,
       );
     }
